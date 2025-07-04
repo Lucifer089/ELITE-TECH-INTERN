@@ -1,0 +1,660 @@
+from flask import Flask, render_template, request, jsonify
+import socket
+import concurrent.futures
+import ipaddress
+import paramiko
+import requests
+from bs4 import BeautifulSoup
+import threading
+import json
+
+app = Flask(__name__)
+
+#BASE TEMPLATE
+BASE_TEMPLATE = """
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}ShaDowReCon{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.6"></script>
+    <style>
+        .scan-progress {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        .module-btn {
+            transition: all 0.2s ease;
+        }
+        .module-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <header class="flex justify-between items-center mb-8 border-b border-gray-700 pb-4">
+            <div class="flex items-center space-x-3">
+                <div class="bg-red-600 w-3 h-3 rounded-full"></div>
+                <div class="bg-yellow-600 w-3 h-3 rounded-full"></div>
+                <div class="bg-green-600 w-3 h-3 rounded-full"></div>
+                <h1 class="text-2xl font-bold">ShaDowReCon</h1>
+            </div>
+            <nav class="flex space-x-4">
+                <a href="/" class="px-3 py-1 rounded hover:bg-gray-800">Dashboard</a>
+                <a href="#" class="px-3 py-1 rounded hover:bg-gray-800">Reports</a>
+                <a href="#" class="px-3 py-1 rounded hover:bg-gray-800">Settings</a>
+            </nav>
+        </header>
+
+        {% block content %}{% endblock %}
+    </div>
+
+    <script>
+        function showTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.add('hidden');
+            });
+            document.getElementById(tabId).classList.remove('hidden');
+
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('bg-blue-600');
+                btn.classList.add('bg-gray-700');
+            });
+            event.currentTarget.classList.remove('bg-gray-700');
+            event.currentTarget.classList.add('bg-blue-600');
+        }
+
+        function confirmAction(message) {
+            return confirm(message);
+        }
+
+        function togglePassword(inputId) {
+            const input = document.getElementById(inputId);
+            const icon = document.querySelector(`#${inputId}-toggle`);
+            if (input.type === "password") {
+                input.type = "text";
+                icon.innerHTML = '&times;';
+            } else {
+                input.type = "password";
+                icon.innerHTML = '👁️';
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+#INDEX TEMPLATE
+
+INDEX_TEMPLATE = """
+{% extends "base.html" %}
+
+{% block content %}
+<main class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+    <div class="lg:col-span-1">
+        <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+            <h2 class="text-lg font-semibold mb-4">Toolkit Modules</h2>
+            <ul class="space-y-2">
+                <li>
+                    <button onclick="showTab('port-scanner')" class="tab-btn w-full text-left px-3 py-2 rounded hover:bg-gray-700 bg-blue-600 flex items-center justify-between module-btn">
+                        Port Scanner
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                        </svg>
+                    </button>
+                </li>
+                <li>
+                    <button onclick="showTab('brute-force')" class="tab-btn w-full text-left px-3 py-2 rounded hover:bg-gray-700 bg-gray-700 module-btn">
+                        Brute Forcer
+                    </button>
+                </li>
+                <li>
+                    <button class="w-full text-left px-3 py-2 rounded hover:bg-gray-700 module-btn" disabled>
+                        Recon Module (Coming Soon)
+                    </button>
+                </li>
+                <li>
+                    <button class="w-full text-left px-3 py-2 rounded hover:bg-gray-700 module-btn" disabled>
+                        Vulnerability Scanner (Coming Soon)
+                    </button>
+                </li>
+            </ul>
+        </div>
+
+        <div class="bg-gray-800 rounded-lg p-4 mt-6 shadow-lg">
+            <h2 class="text-lg font-semibold mb-4">Quick Actions</h2>
+            <button onclick="document.getElementById('quick-target').focus(); showTab('port-scanner')" class="w-full bg-red-600 hover:bg-red-700 text-white px-3 py-2 rounded text-sm module-btn">
+                Quick Target Scan
+            </button>
+            <button onclick="showTab('brute-force')" class="w-full bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-2 rounded text-sm mt-2 module-btn">
+                Common Service Attack
+            </button>
+        </div>
+
+        <div class="bg-gray-800 rounded-lg p-4 mt-6 shadow-lg">
+            <h2 class="text-lg font-semibold mb-4">Scan History</h2>
+            <div class="space-y-3" id="scan-history">
+                <!-- Will be populated by JS -->
+            </div>
+        </div>
+    </div>
+
+    <div class="lg:col-span-3 space-y-6">
+        <!-- Port Scanner View -->
+        <div id="port-scanner" class="tab-content bg-gray-800 rounded-lg p-6 shadow-lg">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-xl font-semibold">Port Scanner</h2>
+            </div>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                    <div class="mb-4">
+                        <label for="quick-target" class="block text-sm font-medium mb-1">Target</label>
+                        <input type="text" id="quick-target" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-500" placeholder="IP or hostname">
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium mb-1">Scan Type</label>
+                        <div class="flex space-x-4">
+                            <div class="flex items-center">
+                                <input type="radio" id="scan-common" name="scan-type" value="common" checked class="mr-2">
+                                <label for="scan-common">Common Ports</label>
+                            </div>
+                            <div class="flex items-center">
+                                <input type="radio" id="scan-range" name="scan-type" value="range" class="mr-2">
+                                <label for="scan-range">Custom Range</label>
+                            </div>
+                            <div class="flex items-center">
+                                <input type="radio" id="scan-all" name="scan-type" value="all" class="mr-2">
+                                <label for="scan-all">All Ports</label>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div id="port-range-container" class="mb-4 hidden">
+                        <label for="port-range" class="block text-sm font-medium mb-1">Port Range</label>
+                        <input type="text" id="port-range" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-500" placeholder="Example: 80-443 or 22,80,443">
+                        <p class="text-xs text-gray-400 mt-1">Enter port numbers separated by commas or ranges with hyphen</p>
+                    </div>
+                    
+                    <button id="start-scan-btn" class="w-full bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded flex items-center justify-center">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                        </svg>
+                        Start Scan
+                    </button>
+                </div>
+                
+                <div>
+                    <div class="mb-4 bg-gray-700 rounded p-3">
+                        <h3 class="text-sm font-medium mb-2">Common Ports</h3>
+                        <div class="flex flex-wrap gap-2">
+                            <span class="bg-gray-600 px-2 py-1 rounded text-xs">FTP (21)</span>
+                            <span class="bg-gray-600 px-2 py-1 rounded text-xs">SSH (22)</span>
+                            <span class="bg-gray-600 px-2 py-1 rounded text-xs">HTTP (80)</span>
+                            <span class="bg-gray-600 px-2 py-1 rounded text-xs">HTTPS (443)</span>
+                            <span class="bg-gray-600 px-2 py-1 rounded text-xs">RDP (3389)</span>
+                            <span class="bg-gray-600 px-2 py-1 rounded text-xs">SMB (445)</span>
+                        </div>
+                    </div>
+                    
+                    <div class="bg-gray-700 rounded p-3">
+                        <h3 class="text-sm font-medium mb-2">Scan Results</h3>
+                        <div id="scan-result-area" class="bg-gray-800 rounded p-3 min-h-40">
+                            <p class="text-gray-400 text-center py-10">Scan results will appear here</p>
+                        </div>
+                        <button id="export-scan" class="w-full bg-gray-600 hover:bg-gray-500 text-white px-3 py-1 rounded text-sm mt-2 hidden">
+                            Export Results
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Brute Force View -->
+        <div id="brute-force" class="tab-content hidden bg-gray-800 rounded-lg p-6 shadow-lg">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-xl font-semibold">Brute Force Attack</h2>
+            </div>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                    <div class="mb-4">
+                        <label for="bf-target" class="block text-sm font-medium mb-1">Target</label>
+                        <input type="text" id="bf-target" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-500" placeholder="IP or hostname">
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label for="bf-service" class="block text-sm font-medium mb-1">Service</label>
+                        <select id="bf-service" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-500">
+                            <option value="ssh">SSH (22)</option>
+                            <option value="http">HTTP Basic Auth</option>
+                        </select>
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label for="bf-username" class="block text-sm font-medium mb-1">Username (Optional)</label>
+                        <input type="text" id="bf-username" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-500" placeholder="Leave empty to use common usernames">
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label for="bf-passwords" class="block text-sm font-medium mb-1">Passwords List</label>
+                        <textarea id="bf-passwords" rows="5" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-500" placeholder="One password per line">
+admin
+password
+123456
+password123
+root
+test
+qwerty</textarea>
+                    </div>
+                    
+                    <button id="start-bf-btn" class="w-full bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded flex items-center justify-center">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                        Start Attack
+                    </button>
+                </div>
+                
+                <div>
+                    <div class="mb-4 bg-gray-700 rounded p-3">
+                        <h3 class="text-sm font-medium mb-2">Attack Settings</h3>
+                        <div class="space-y-2">
+                            <div class="flex items-center">
+                                <input type="checkbox" id="bf-delay" class="mr-2">
+                                <label for="bf-delay">Add random delay (1-5s) between attempts</label>
+                            </div>
+                            <div class="flex items-center">
+                                <input type="checkbox" id="bf-save" class="mr-2" checked>
+                                <label for="bf-save">Save successful attempts</label>
+                            </div>
+                            <div class="flex items-center">
+                                <input type="checkbox" id="bf-stop" class="mr-2" checked>
+                                <label for="bf-stop">Stop after first success</label>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="bg-gray-700 rounded p-3">
+                        <h3 class="text-sm font-medium mb-2">Attack Results</h3>
+                        <div id="bf-result-area" class="bg-gray-800 rounded p-3 min-h-40">
+                            <p class="text-gray-400 text-center py-10">Attack results will appear here</p>
+                        </div>
+                        <button id="export-bf" class="w-full bg-gray-600 hover:bg-gray-500 text-white px-3 py-1 rounded text-sm mt-2 hidden">
+                            Export Results
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</main>
+
+<script>
+    // Handle scan type changes
+    document.querySelectorAll('input[name="scan-type"]').forEach(radio => {
+        radio.addEventListener('change', function() {
+            const portRangeContainer = document.getElementById('port-range-container');
+            if (this.value === 'range') {
+                portRangeContainer.classList.remove('hidden');
+            } else {
+                portRangeContainer.classList.add('hidden');
+            }
+        });
+    });
+
+    // Port scanner functionality
+    document.getElementById('start-scan-btn').addEventListener('click', async function() {
+        const target = document.getElementById('quick-target').value.trim();
+        const scanType = document.querySelector('input[name="scan-type"]:checked').value;
+        let ports = '';
+        
+        if (!target) {
+            alert('Please enter a target');
+            return;
+        }
+
+        if (scanType === 'range') {
+            ports = document.getElementById('port-range').value.trim();
+            if (!ports) {
+                alert('Please enter port range');
+                return;
+            }
+        }
+
+        const btn = this;
+        btn.disabled = true;
+        btn.innerHTML = '<svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"> <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle> <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path> </svg> Scanning...';
+
+        const resultArea = document.getElementById('scan-result-area');
+        resultArea.innerHTML = '<div class="text-center py-8"><div class="inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div><p class="mt-2 text-gray-400">Scanning target ports...</p></div>';
+
+        try {
+            const response = await fetch('/portscan', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    target: target,
+                    type: scanType,
+                    ports: ports
+                })
+            });
+
+            const data = await response.json();
+            
+            if (data.error) {
+                resultArea.innerHTML = `<p class="text-red-400">Error: ${data.error}</p>`;
+            } else {
+                let html = `
+                    <div class="mb-4">
+                        <h4 class="font-medium">Scan Summary</h4>
+                        <p>Target: ${data.target}</p>
+                        <p>Ports scanned: ${data.total_ports_scanned}</p>
+                        <p>Open ports found: ${data.open_ports_count}</p>
+                    </div>
+                    <div>
+                        <h4 class="font-medium mb-2">Open Ports</h4>
+                        <table class="w-full border-collapse">
+                            <thead>
+                                <tr class="bg-gray-700">
+                                    <th class="p-2 text-left">Port</th>
+                                    <th class="p-2 text-left">Service</th>
+                                    <th class="p-2 text-left">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                `;
+                
+                data.open_ports.forEach(port => {
+                    html += `
+                        <tr class="border-b border-gray-700">
+                            <td class="p-2">${port.port}</td>
+                            <td class="p-2">${port.service || 'Unknown'}</td>
+                            <td class="p-2"><span class="bg-green-500 text-white px-2 py-0.5 rounded text-xs">Open</span></td>
+                        </tr>
+                    `;
+                });
+                
+                html += `
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+                
+                resultArea.innerHTML = html;
+                document.getElementById('export-scan').classList.remove('hidden');
+                
+                // Add to history
+                const historyItem = document.createElement('div');
+                historyItem.className = 'flex justify-between items-center text-sm';
+                historyItem.innerHTML = `
+                    <span>${data.target}</span>
+                    <span class="text-green-400">Completed</span>
+                `;
+                document.getElementById('scan-history').prepend(historyItem);
+            }
+        } catch (error) {
+            resultArea.innerHTML = `<p class="text-red-400">Error: ${error.message}</p>`;
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg> Start Scan';
+        }
+    });
+
+    // Brute force functionality
+    document.getElementById('start-bf-btn').addEventListener('click', async function() {
+        const target = document.getElementById('bf-target').value.trim();
+        const service = document.getElementById('bf-service').value;
+        const username = document.getElementById('bf-username').value.trim();
+        const passwords = document.getElementById('bf-passwords').value.trim().split('\n');
+        
+        if (!target) {
+            alert('Please enter a target');
+            return;
+        }
+
+        const btn = this;
+        btn.disabled = true;
+        btn.innerHTML = '<svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Attacking...';
+
+        const resultArea = document.getElementById('bf-result-area');
+        resultArea.innerHTML = '<div class="text-center py-8"><div class="inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-red-500"></div><p class="mt-2 text-gray-400">Running brute force attack...</p></div>';
+
+        try {
+            const response = await fetch('/bruteforce', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    target: target,
+                    service: service,
+                    username: username,
+                    password_list: passwords
+                })
+            });
+
+            const data = await response.json();
+            
+            if (data.error) {
+                resultArea.innerHTML = `<p class="text-red-400">Error: ${data.error}</p>`;
+            } else {
+                let html = `
+                    <div class="mb-4">
+                        <h4 class="font-medium">Attack Summary</h4>
+                        <p>Target: ${data.target}</p>
+                        <p>Service: ${service.toUpperCase()}</p>
+                        <p>Attempts: ${data.attempts}</p>
+                        <p>Success rate: ${data.successful_attempts > 0 ? '<span class="text-green-400">Success</span>' : '<span class="text-red-400">Failed</span>'}</p>
+                    </div>
+                `;
+                
+                // Here you would typically show successful credentials
+                // Since our backend doesn't return them in this example, we just show the summary
+                
+                resultArea.innerHTML = html;
+                document.getElementById('export-bf').classList.remove('hidden');
+            }
+        } catch (error) {
+            resultArea.innerHTML = `<p class="text-red-400">Error: ${error.message}</p>`;
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg> Start Attack';
+        }
+    });
+
+    // Initialize with port scanner visible
+    document.addEventListener('DOMContentLoaded', function() {
+        showTab('port-scanner');
+    });
+</script>
+{% endblock %}
+
+
+"""
+
+
+# Global configuration
+CONFIG = {
+    'max_threads': 50,
+    'common_ports': [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 993, 995, 3389],
+    'common_usernames': ['admin', 'root', 'user', 'administrator'],
+    'common_passwords': ['password', '123456', 'admin', 'root', 'password123']
+}
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/portscan', methods=['POST'])
+def port_scan():
+    data = request.json
+    target = data.get('target')
+    ports = data.get('ports', CONFIG['common_ports'])
+    scan_type = data.get('type', 'common')
+
+    if not target:
+        return jsonify({'error': 'Target is required'}), 400
+
+    try:
+        # Validate target
+        try:
+            ipaddress.ip_address(target)
+        except ValueError:
+            # If not IP, resolve hostname
+            target = socket.gethostbyname(target)
+
+        # Handle scan types
+        if scan_type == 'common':
+            ports = CONFIG['common_ports']
+        elif scan_type == 'range':
+            if '-' in str(ports):
+                start, end = map(int, str(ports).split('-'))
+                ports = list(range(start, end + 1))
+            else:
+                ports = [int(p) for p in str(ports).split(',')]
+        elif scan_type == 'all':
+            ports = list(range(1, 65536))
+
+        results = []
+        open_ports = []
+
+        def scan_port(port):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(1)
+                    result = s.connect_ex((target, port))
+                    if result == 0:
+                        service = socket.getservbyport(port, 'tcp')
+                        open_ports.append({
+                            'port': port,
+                            'service': service,
+                            'status': 'open'
+                        })
+                        return port
+            except:
+                pass
+            return None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=CONFIG['max_threads']) as executor:
+            future_to_port = {executor.submit(scan_port, port): port for port in ports}
+            for future in concurrent.futures.as_completed(future_to_port):
+                port = future_to_port[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    print(f'Port {port} generated an exception: {exc}')
+
+        return jsonify({
+            'status': 'completed',
+            'target': target,
+            'open_ports': open_ports,
+            'total_ports_scanned': len(ports),
+            'open_ports_count': len(open_ports)
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/bruteforce', methods=['POST'])
+def brute_force():
+    data = request.json
+    target = data.get('target')
+    service = data.get('service')
+    username = data.get('username', '')
+    username_list = data.get('username_list', CONFIG['common_usernames'])
+    password_list = data.get('password_list', CONFIG['common_passwords'])
+
+    if not target:
+        return jsonify({'error': 'Target is required'}), 400
+
+    try:
+        results = []
+        if service == 'ssh':
+            results = ssh_bruteforce(target, username, username_list, password_list)
+        elif service == 'http':
+            results = http_bruteforce(target, username, username_list, password_list)
+        else:
+            return jsonify({'error': 'Unsupported service'}), 400
+
+        return jsonify({
+            'status': 'completed',
+            'target': target,
+            'service': service,
+            'attempts': len(password_list) * (1 if username else len(username_list)),
+            'successful_attempts': len([r for r in results if r['success']])
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def ssh_bruteforce(target, username, username_list, password_list):
+    results = []
+    for user in username_list if not username else [username]:
+        for password in password_list:
+            try:
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(target, port=22, username=user, password=password, timeout=3)
+                results.append({
+                    'username': user,
+                    'password': password,
+                    'success': True
+                })
+                client.close()
+                break  # Stop after first successful attempt
+            except Exception as e:
+                results.append({
+                    'username': user,
+                    'password': password,
+                    'success': False,
+                    'error': str(e)
+                })
+    return results
+
+def http_bruteforce(target, username, username_list, password_list):
+    results = []
+    for user in username_list if not username else [username]:
+        for password in password_list:
+            try:
+                # This is a simplified example - real implementations would need proper authentication handling
+                response = requests.get(target, auth=(user, password))
+                if response.status_code == 200:
+                    results.append({
+                        'username': user,
+                        'password': password,
+                        'success': True
+                    })
+                    break  # Stop after first successful attempt
+                else:
+                    results.append({
+                        'username': user,
+                        'password': password,
+                        'success': False,
+                        'error': f'HTTP {response.status_code}'
+                    })
+            except Exception as e:
+                results.append({
+                    'username': user,
+                    'password': password,
+                    'success': False,
+                    'error': str(e)
+                })
+    return results
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
