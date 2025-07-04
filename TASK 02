@@ -1,0 +1,715 @@
+from flask import Flask, render_template_string, request, jsonify
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse as parse_url
+import threading
+import time
+from datetime import datetime
+import json
+
+app = Flask(__name__)
+
+# HTML Content (from index.html)
+HTML_TEMPLATE = """
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGuard Vulnerability Scanner</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f8fafc;
+        }
+        .logo-text {
+            background: linear-gradient(90deg, #3b82f6, #6366f1);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .scan-progress {
+            transition: width 0.3s ease;
+        }
+        .log-entry {
+            transition: all 0.2s ease;
+        }
+        .log-entry:hover {
+            background-color: #f3f4f6;
+        }
+        .vulnerability-badge {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 0.9; }
+            50% { opacity: 0.6; }
+            100% { opacity: 0.9; }
+        }
+    </style>
+</head>
+<body>
+    <div class="min-h-screen flex flex-col">
+        <!-- Header -->
+        <header class="bg-gradient-to-r from-blue-600 to-indigo-600 shadow-lg">
+            <div class="container mx-auto px-4 py-6">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center space-x-3">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04l.054-.09A13.916 13.916 0 008 11a4 4 0 118 0c0 1.017-.07 2.019-.203 3m-2.118 6.844A21.88 21.88 0 0015.171 17m3.839 1.132c.645-2.266.99-4.659.99-7.132A8 8 0 008 4.071M3 15.364c.64-1.319 1-2.8 1-4.364 0-1.457.39-2.823 1.07-4" />
+                        </svg>
+                        <h1 class="text-3xl font-bold logo-text">WebGuard</h1>
+                    </div>
+                    <span class="px-3 py-1 bg-white/20 rounded-full text-white text-sm font-semibold">Vulnerability Scanner</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="flex-1 container mx-auto px-4 py-8">
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <!-- Left Panel - Controls -->
+                <div class="lg:col-span-1 space-y-6">
+                    <!-- Scan Target Card -->
+                    <div class="bg-white rounded-xl shadow-md overflow-hidden">
+                        <div class="px-6 py-4 bg-gradient-to-r from-blue-50 to-indigo-50 border-b border-blue-100">
+                            <h2 class="text-lg font-semibold text-gray-800">Scan Target</h2>
+                        </div>
+                        <div class="p-6">
+                            <div class="mb-4">
+                                <label for="targetUrl" class="block text-sm font-medium text-gray-700 mb-1">Website URL</label>
+                                <div class="relative rounded-md shadow-sm">
+                                    <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                                        </svg>
+                                    </div>
+                                    <input type="text" id="targetUrl" placeholder="https://example.com" class="block w-full pl-10 pr-12 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500">
+                                </div>
+                                <p class="mt-1 text-xs text-gray-500">Enter the full URL of the website to scan</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Scan Options Card -->
+                    <div class="bg-white rounded-xl shadow-md overflow-hidden">
+                        <div class="px-6 py-4 bg-gradient-to-r from-blue-50 to-indigo-50 border-b border-blue-100">
+                            <h2 class="text-lg font-semibold text-gray-800">Scan Options</h2>
+                        </div>
+                        <div class="p-6">
+                            <div class="space-y-4">
+                                <div class="flex items-start">
+                                    <div class="flex items-center h-5">
+                                        <input id="sqlInjection" name="sqlInjection" type="checkbox" checked class="focus:ring-blue-500 h-4 w-4 text-blue-600 border-gray-300 rounded">
+                                    </div>
+                                    <div class="ml-3">
+                                        <label for="sqlInjection" class="font-medium text-gray-700">SQL Injection</label>
+                                        <p class="text-sm text-gray-500">Test for database injection vulnerabilities</p>
+                                    </div>
+                                </div>
+
+                                <div class="flex items-start">
+                                    <div class="flex items-center h-5">
+                                        <input id="xss" name="xss" type="checkbox" checked class="focus:ring-blue-500 h-4 w-4 text-blue-600 border-gray-300 rounded">
+                                    </div>
+                                    <div class="ml-3">
+                                        <label for="xss" class="font-medium text-gray-700">Cross-Site Scripting (XSS)</label>
+                                        <p class="text-sm text-gray-500">Test for script injection vulnerabilities</p>
+                                    </div>
+                                </div>
+
+                                <div class="flex items-start">
+                                    <div class="flex items-center h-5">
+                                        <input id="crawlSite" name="crawlSite" type="checkbox" checked class="focus:ring-blue-500 h-4 w-4 text-blue-600 border-gray-300 rounded">
+                                    </div>
+                                    <div class="ml-3">
+                                        <label for="crawlSite" class="font-medium text-gray-700">Crawl Website</label>
+                                        <p class="text-sm text-gray-500">Follow and scan linked pages</p>
+                                    </div>
+                                </div>
+
+                                <div class="pt-2">
+                                    <label for="crawlDepth" class="block text-sm font-medium text-gray-700 mb-1">Crawl Depth: <span id="depthValue" class="font-semibold">1</span></label>
+                                    <input id="crawlDepth" type="range" min="1" max="5" value="1" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <div class="space-y-3">
+                        <button id="startScanBtn" type="button" class="w-full inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                            </svg>
+                            Start Scan
+                        </button>
+                        <button id="stopScanBtn" type="button" disabled class="w-full inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 opacity-50 cursor-not-allowed">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0zM12 10v4m0 0v-4m0 4h4m-4-4H8" />
+                            </svg>
+                            Stop Scan
+                        </button>
+                        <button id="exportReportBtn" type="button" class="w-full inline-flex justify-center items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                            </svg>
+                            Export Report
+                        </button>
+                    </div>
+
+                    <!-- Stats Card -->
+                    <div class="bg-white rounded-xl shadow-md overflow-hidden">
+                        <div class="px-6 py-4 bg-gradient-to-r from-blue-50 to-indigo-50 border-b border-blue-100">
+                            <h2 class="text-lg font-semibold text-gray-800">Scan Statistics</h2>
+                        </div>
+                        <div class="p-6">
+                            <div class="grid grid-cols-2 gap-4 mb-4">
+                                <div class="bg-gray-50 rounded-lg p-3 text-center">
+                                    <p class="text-sm text-gray-500">Pages Scanned</p>
+                                    <p id="pagesScanned" class="text-2xl font-bold text-gray-800">0</p>
+                                </div>
+                                <div class="bg-gray-50 rounded-lg p-3 text-center">
+                                    <p class="text-sm text-gray-500">Vulnerabilities</p>
+                                    <p id="vulnerabilitiesFound" class="text-2xl font-bold text-gray-800">0</p>
+                                </div>
+                            </div>
+                            <div class="space-y-2">
+                                <div class="flex justify-between text-sm">
+                                    <span class="text-gray-600">Scan Time:</span>
+                                    <span id="scanTime" class="font-medium text-gray-800">0s</span>
+                                </div>
+                                <div class="flex justify-between text-sm">
+                                    <span class="text-gray-600">Scan Status:</span>
+                                    <span id="scanStatus" class="font-medium text-gray-800">Idle</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right Panel - Results -->
+                <div class="lg:col-span-2">
+                    <!-- Progress Bar -->
+                    <div class="mb-6">
+                        <div class="flex justify-between mb-1">
+                            <span id="progressPercent" class="text-sm font-medium text-blue-700">0%</span>
+                            <span class="text-sm font-medium text-gray-500">
+                                <span id="resultsCount">0</span> results
+                            </span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2.5">
+                            <div id="progressBar" class="bg-blue-600 h-2.5 rounded-full scan-progress" style="width: 0%"></div>
+                        </div>
+                    </div>
+
+                    <!-- Results Tabs -->
+                    <div class="bg-white rounded-xl shadow-md overflow-hidden">
+                        <div class="border-b border-gray-200">
+                            <nav class="flex -mb-px">
+                                <button id="scanLogTab" class="px-4 py-2 text-sm font-medium text-blue-600 border-b-2 border-blue-600">Scan Log</button>
+                                <button id="vulnerabilitiesTab" class="px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-700 border-b-2 border-transparent hover:border-gray-300">Vulnerabilities</button>
+                            </nav>
+                        </div>
+                        
+                        <!-- Scan Log Content -->
+                        <div id="scanLogContent" class="p-4">
+                            <div class="relative">
+                                <div class="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                                    </svg>
+                                </div>
+                                <input id="logSearch" type="text" class="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full pl-10 p-2.5 mb-3" placeholder="Search scan logs...">
+                            </div>
+                            
+                            <div id="scanLogs" class="h-96 overflow-y-auto p-2 space-y-2">
+                                <div class="text-center text-gray-500 py-10">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 mx-auto opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                    </svg>
+                                    <p class="mt-2">No scan results yet. Start a scan to see logs here.</p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Vulnerabilities Content -->
+                        <div id="vulnerabilitiesContent" class="p-4 hidden">
+                            <div class="relative">
+                                <div class="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                                    </svg>
+                                </div>
+                                <input id="vulnSearch" type="text" class="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full pl-10 p-2.5 mb-3" placeholder="Search vulnerabilities...">
+                            </div>
+                            
+                            <div id="vulnerabilitiesList" class="h-96 overflow-y-auto p-2 space-y-3">
+                                <div class="text-center text-gray-500 py-10">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 mx-auto opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                                    </svg>
+                                    <p class="mt-2">No vulnerabilities found yet. Start a scan to check for issues.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="bg-gray-800 text-white py-4">
+            <div class="container mx-auto px-4 text-center text-sm">
+                <p>WebGuard Vulnerability Scanner &copy; 2023 | Built with Flask and Python</p>
+            </div>
+        </footer>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // UI Elements
+            const targetUrl = document.getElementById('targetUrl');
+            const sqlInjection = document.getElementById('sqlInjection');
+            const xss = document.getElementById('xss');
+            const crawlSite = document.getElementById('crawlSite');
+            const crawlDepth = document.getElementById('crawlDepth');
+            const depthValue = document.getElementById('depthValue');
+            const startScanBtn = document.getElementById('startScanBtn');
+            const stopScanBtn = document.getElementById('stopScanBtn');
+            const exportReportBtn = document.getElementById('exportReportBtn');
+            const pagesScanned = document.getElementById('pagesScanned');
+            const vulnerabilitiesFound = document.getElementById('vulnerabilitiesFound');
+            const scanTime = document.getElementById('scanTime');
+            const scanStatus = document.getElementById('scanStatus');
+            const progressBar = document.getElementById('progressBar');
+            const progressPercent = document.getElementById('progressPercent');
+            const resultsCount = document.getElementById('resultsCount');
+            const scanLogs = document.getElementById('scanLogs');
+            const vulnerabilitiesList = document.getElementById('vulnerabilitiesList');
+            const scanLogTab = document.getElementById('scanLogTab');
+            const vulnerabilitiesTab = document.getElementById('vulnerabilitiesTab');
+            const scanLogContent = document.getElementById('scanLogContent');
+            const vulnerabilitiesContent = document.getElementById('vulnerabilitiesContent');
+            
+            // Update crawl depth display
+            crawlDepth.addEventListener('input', function() {
+                depthValue.textContent = this.value;
+            });
+            
+            // Tab switching
+            scanLogTab.addEventListener('click', function() {
+                scanLogTab.classList.add('text-blue-600', 'border-blue-600');
+                scanLogTab.classList.remove('text-gray-500', 'border-transparent');
+                vulnerabilitiesTab.classList.add('text-gray-500', 'border-transparent');
+                vulnerabilitiesTab.classList.remove('text-blue-600', 'border-blue-600');
+                scanLogContent.classList.remove('hidden');
+                vulnerabilitiesContent.classList.add('hidden');
+            });
+            
+            vulnerabilitiesTab.addEventListener('click', function() {
+                vulnerabilitiesTab.classList.add('text-blue-600', 'border-blue-600');
+                vulnerabilitiesTab.classList.remove('text-gray-500', 'border-transparent');
+                scanLogTab.classList.add('text-gray-500', 'border-transparent');
+                scanLogTab.classList.remove('text-blue-600', 'border-blue-600');
+                vulnerabilitiesContent.classList.remove('hidden');
+                scanLogContent.classList.add('hidden');
+            });
+            
+            // Start scan button
+            startScanBtn.addEventListener('click', function() {
+                const url = targetUrl.value.trim();
+                if (!url) {
+                    alert('Please enter a target URL');
+                    return;
+                }
+                
+                const scanOptions = {
+                    sql_injection: sqlInjection.checked,
+                    xss: xss.checked,
+                    crawl: crawlSite.checked,
+                    depth: parseInt(crawlDepth.value)
+                };
+                
+                fetch('/start_scan', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        url: url,
+                        ...scanOptions
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        alert(data.error);
+                    } else {
+                        startScanBtn.disabled = true;
+                        stopScanBtn.disabled = false;
+                        stopScanBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+                        
+                        // Clear previous results
+                        scanLogs.innerHTML = '';
+                        vulnerabilitiesList.innerHTML = '';
+                        pagesScanned.textContent = '0';
+                        vulnerabilitiesFound.textContent = '0';
+                        scanTime.textContent = '0s';
+                        scanStatus.textContent = 'Scanning...';
+                        
+                        // Start polling for updates
+                        pollScanStatus();
+                    }
+                });
+            });
+            
+            // Stop scan button
+            stopScanBtn.addEventListener('click', function() {
+                fetch('/stop_scan', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    scanStatus.textContent = 'Stopping scan...';
+                });
+            });
+            
+            // Export report button
+            exportReportBtn.addEventListener('click', function() {
+                fetch('/export_report')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        alert(data.error);
+                    } else {
+                        // Create a download link
+                        const element = document.createElement('a');
+                        element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(data.report));
+                        element.setAttribute('download', 'vulnerability_report.txt');
+                        
+                        element.style.display = 'none';
+                        document.body.appendChild(element);
+                        
+                        element.click();
+                        
+                        document.body.removeChild(element);
+                    }
+                });
+            });
+            
+            // Poll scan status
+            function pollScanStatus() {
+                fetch('/scan_status')
+                .then(response => response.json())
+                .then(data => {
+                    // Update progress
+                    progressBar.style.width = `${data.progress}%`;
+                    progressPercent.textContent = `${Math.round(data.progress)}%`;
+                    
+                    // Update status
+                    scanStatus.textContent = data.status;
+                    pagesScanned.textContent = data.stats.pages_scanned;
+                    vulnerabilitiesFound.textContent = data.stats.vulnerabilities;
+                    scanTime.textContent = `${data.stats.scan_time}s`;
+                    
+                    // Update logs
+                    if (data.results && data.results.length > 0) {
+                        resultsCount.textContent = data.results.length;
+                        
+                        // Update scan logs
+                        scanLogs.innerHTML = '';
+                        data.results.forEach(result => {
+                            if (typeof result === 'string') {
+                                const logEntry = document.createElement('div');
+                                logEntry.className = 'log-entry p-2 bg-gray-50 rounded-lg text-sm';
+                                logEntry.textContent = result;
+                                scanLogs.appendChild(logEntry);
+                            } else {
+                                // This is a vulnerability
+                                const vulnEntry = document.createElement('div');
+                                vulnEntry.className = 'log-entry p-3 border-l-4 border-red-500 bg-red-50 rounded-lg';
+                                vulnEntry.innerHTML = `
+                                    <div class="flex justify-between items-start">
+                                        <div>
+                                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 vulnerability-badge">
+                                                ${result.type}
+                                            </span>
+                                            <p class="mt-1 text-sm font-medium text-gray-900">${result.url}</p>
+                                            <p class="text-sm text-gray-500">Parameter: ${result.parameter}</p>
+                                            <p class="text-sm text-gray-500">Payload: <code class="bg-gray-100 px-1 rounded">${result.payload}</code></p>
+                                        </div>
+                                    </div>
+                                `;
+                                scanLogs.appendChild(vulnEntry);
+                                
+                                // Also add to vulnerabilities list
+                                const vulnListItem = document.createElement('div');
+                                vulnListItem.className = 'border rounded-lg p-3';
+                                vulnListItem.innerHTML = `
+                                    <div class="flex justify-between items-start">
+                                        <div>
+                                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                                                ${result.type}
+                                            </span>
+                                            <p class="mt-1 text-sm font-medium text-gray-900">${result.url}</p>
+                                        </div>
+                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                                        </svg>
+                                    </div>
+                                    <div class="mt-2 text-sm text-gray-500">
+                                        <p><strong>Parameter:</strong> ${result.parameter}</p>
+                                        <p><strong>Payload:</strong> <code class="bg-gray-100 px-1 rounded">${result.payload}</code></p>
+                                        <p><strong>Evidence:</strong> ${result.evidence}</p>
+                                    </div>
+                                `;
+                                vulnerabilitiesList.appendChild(vulnListItem);
+                            }
+                        });
+                    }
+                    
+                    // Update button states
+                    if (!data.active) {
+                        startScanBtn.disabled = false;
+                        stopScanBtn.disabled = true;
+                        stopScanBtn.classList.add('opacity-50', 'cursor-not-allowed');
+                    }
+                    
+                    // Continue polling if scan is active
+                    if (data.active) {
+                        setTimeout(pollScanStatus, 1000);
+                    }
+                });
+            }
+            
+            // Initial poll to check for existing scan
+            pollScanStatus();
+        });
+    </script>
+</body>
+</html>
+"""
+
+
+# Shared scan data
+scan_data = {
+    'active': False,
+    'stop_requested': False,
+    'progress': 0,
+    'status': '',
+    'results': [],
+    'stats': {
+        'pages_scanned': 0,
+        'vulnerabilities': 0,
+        'scan_time': 0
+    }
+}
+
+SQL_PAYLOADS = ["'", "\"", "' OR '1'='1", "\" OR \"1\"=\"1", "' OR 1=1--", "\" OR 1=1--", "admin'--",
+                "1' ORDER BY 1--", "1' UNION SELECT null, table_name FROM information_schema.tables--"]
+XSS_PAYLOADS = [
+    "<script>alert('XSS')</script>",
+    "<img src=x onerror=alert('XSS')>",
+    "<svg/onload=alert('XSS')>",
+    "\"><script>alert('XSS')</script>",
+    "javascript:alert('XSS')"
+]
+
+def is_sql_vulnerable(response_text):
+    errors = [
+        'SQL syntax', 'mysql_fetch', 'syntax error', 'unclosed quotation mark',
+        'ORA-00933', 'Microsoft OLE DB Provider', 'ODBC Driver',
+        'PostgreSQL query failed', 'SQLite3.OperationalError'
+    ]
+    return any(err.lower() in response_text.lower() for err in errors)
+
+def get_form_details(form):
+    return {
+        'action': form.attrs.get('action', '').lower(),
+        'method': form.attrs.get('method', 'get').lower(),
+        'inputs': [f"{i.attrs.get('name')} ({i.attrs.get('type', 'text')})"
+                   for i in form.find_all('input') if i.attrs.get('name')]
+    }
+
+def log_result(message):
+    scan_data['results'].append(message)
+    if len(scan_data['results']) > 200:
+        scan_data['results'].pop(0)
+
+def crawl_and_scan(url, depth, options):
+    if depth < 0 or scan_data['stop_requested']:
+        return
+    scan_data.setdefault('visited_urls', set()).add(url)
+    if url in scan_data['visited_urls']:
+        return
+    scan_data['visited_urls'].add(url)
+    scan_data['stats']['pages_scanned'] += 1
+    scan_data['status'] = f"Scanning: {url}"
+    log_result(f"\nScanning: {url}")
+    scan_url(url, options)
+
+    if depth == 0 or scan_data['stop_requested']:
+        return
+
+    try:
+        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for link in soup.find_all('a', href=True):
+                href = urljoin(url, link['href'])
+                if href.startswith(('http://', 'https://')) and parse_url(href).netloc == parse_url(url).netloc:
+                    crawl_and_scan(href, depth - 1, options)
+    except Exception as e:
+        log_result(f"Error crawling {url}: {str(e)}")
+
+def scan_url(url, options):
+    try:
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        if res.status_code != 200:
+            log_result(f"Failed to fetch URL (Status {res.status_code})")
+            return
+        soup = BeautifulSoup(res.text, 'html.parser')
+        forms = soup.find_all('form')
+        if not forms:
+            log_result("No forms found on this page")
+            return
+
+        for form in forms:
+            if scan_data['stop_requested']: return
+            form_details = get_form_details(form)
+            log_result(f"\nTesting form at {url}")
+            log_result(f"Action: {form_details['action']}")
+            log_result(f"Method: {form_details['method']}")
+            log_result(f"Inputs: {', '.join(form_details['inputs'])}")
+            if options['sql_injection']: test_sql_injection(url, form_details)
+            if options['xss']: test_xss(url, form_details)
+
+    except requests.exceptions.RequestException as e:
+        log_result(f"Error scanning {url}: {str(e)}")
+
+def test_sql_injection(url, form_details):
+    log_result("\nTesting for SQL Injection...")
+    for payload in SQL_PAYLOADS:
+        if scan_data['stop_requested']: return
+        name = form_details['inputs'][0].split(' (')[0]
+        data = {name: payload}
+        try:
+            action_url = urljoin(url, form_details['action'])
+            if form_details['method'] == 'post':
+                r = requests.post(action_url, data=data, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+            else:
+                r = requests.get(action_url, params=data, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+
+            if is_sql_vulnerable(r.text):
+                vuln = {'type': 'SQL Injection', 'url': url, 'parameter': name, 'payload': payload, 'evidence': 'Database error message detected'}
+                scan_data['results'].append(vuln)
+                scan_data['stats']['vulnerabilities'] += 1
+                log_result(f"VULNERABLE: SQL Injection with payload: {payload}")
+                break
+        except Exception as e:
+            log_result(f"Error testing SQLi payload {payload}: {str(e)}")
+
+def test_xss(url, form_details):
+    log_result("\nTesting for XSS...")
+    for payload in XSS_PAYLOADS:
+        if scan_data['stop_requested']: return
+        name = form_details['inputs'][0].split(' (')[0]
+        data = {name: payload}
+        try:
+            action_url = urljoin(url, form_details['action'])
+            if form_details['method'] == 'post':
+                r = requests.post(action_url, data=data, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+            else:
+                r = requests.get(action_url, params=data, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+            if payload in r.text:
+                vuln = {'type': 'Cross-Site Scripting (XSS)', 'url': url, 'parameter': name, 'payload': payload, 'evidence': 'Payload reflected in response'}
+                scan_data['results'].append(vuln)
+                scan_data['stats']['vulnerabilities'] += 1
+                log_result(f"VULNERABLE: XSS with payload: {payload}")
+                break
+        except Exception as e:
+            log_result(f"Error testing XSS payload {payload}: {str(e)}")
+
+def perform_scan(target_url, options):
+    try:
+        scan_data.update({'active': True, 'stop_requested': False, 'progress': 0, 'results': [], 'stats': {'pages_scanned': 0, 'vulnerabilities': 0, 'scan_time': 0}})
+        start = time.time()
+        def update_progress():
+            while scan_data['active'] and not scan_data['stop_requested']:
+                elapsed = time.time() - start
+                scan_data['progress'] = min(90, elapsed * 10) if elapsed < 10 else 90 + ((time.time() % 3) * 3)
+                time.sleep(0.3)
+
+        threading.Thread(target=update_progress, daemon=True).start()
+
+        log_result("=== Starting Scan ===")
+        log_result(f"Target: {target_url}")
+        log_result(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        log_result(f"Options: {json.dumps(options, indent=2)}")
+        crawl_and_scan(target_url, options['depth'], options) if options['crawl'] else scan_url(target_url, options)
+
+        if not scan_data['stop_requested']:
+            log_result("\n=== Scan Complete ===")
+            log_result(f"Total vulnerabilities found: {scan_data['stats']['vulnerabilities']}")
+            for i, v in enumerate(scan_data['results'], 1):
+                if isinstance(v, dict):
+                    log_result(f"{i}. {v['type']} at {v['url']}\n   Parameter: {v['parameter']}\n   Payload: {v['payload']}\n   Evidence: {v['evidence']}")
+        scan_data['status'] = "Scan completed successfully"
+    except Exception as e:
+        scan_data['status'] = f"Error: {str(e)}"
+        log_result(str(e))
+    finally:
+        scan_data['stats']['scan_time'] = int(time.time() - start)
+        scan_data['progress'] = 100 if not scan_data['stop_requested'] else 0
+        scan_data['active'] = False
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/start_scan', methods=['POST'])
+def start_scan():
+    if scan_data['active']:
+        return jsonify({'error': 'Scan already in progress'}), 400
+    req = request.json
+    if not req.get('url'):
+        return jsonify({'error': 'URL is required'}), 400
+    options = {
+        'sql_injection': req.get('sql_injection', True),
+        'xss': req.get('xss', True),
+        'crawl': req.get('crawl', True),
+        'depth': req.get('depth', 1)
+    }
+    threading.Thread(target=perform_scan, args=(req['url'], options), daemon=True).start()
+    return jsonify({'message': 'Scan started successfully'})
+
+@app.route('/stop_scan', methods=['POST'])
+def stop_scan():
+    scan_data['stop_requested'] = True
+    return jsonify({'message': 'Scan stop requested'})
+
+@app.route('/scan_status', methods=['GET'])
+def scan_status():
+    return jsonify({
+        'active': scan_data['active'],
+        'progress': scan_data['progress'],
+        'status': scan_data['status'],
+        'stats': scan_data['stats'],
+        'results': scan_data['results'][-50:]
+    })
+
+@app.route('/export_report', methods=['GET'])
+def export_report():
+    if not scan_data['results']:
+        return jsonify({'error': 'No results to export'}), 400
+    return jsonify({'report': "\n".join(str(x) for x in scan_data['results'])})
+
+if __name__ == '__main__':
+    app.run(debug=True)
