@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import sys
+import webbrowser
+from datetime import datetime
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, scrolledtext
+from PIL import Image, ImageTk
+import sv_ttk
+
+class FileMonitorApp:
+    def __init__(self, root):
+        self.root = root
+        self.setup_window()
+        self.create_widgets()
+        self.style_interface()
+        self.history_file = '.file_monitor_history.json'
+        self.current_hashes = {}
+        self.history = self.load_history()
+        
+    def setup_window(self):
+        self.root.title("FileGuard - Integrity Monitor")
+        self.root.geometry("1000x700")
+        self.root.minsize(800, 600)
+        try:
+            self.root.iconbitmap(self.resource_path("icon.ico"))
+        except:
+            pass
+        
+    def resource_path(self, relative_path):
+        try:
+            base_path = sys._MEIPASS
+        except Exception:
+            base_path = os.path.abspath(".")
+        return os.path.join(base_path, relative_path)
+        
+    def load_history(self):
+        try:
+            if os.path.exists(self.history_file):
+                with open(self.history_file, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            messagebox.showwarning("Warning", f"Could not load history: {str(e)}")
+        return {}
+        
+    def save_history(self):
+        try:
+            with open(self.history_file, 'w') as f:
+                json.dump(self.current_hashes, f, indent=2)
+            return True
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not save history: {str(e)}")
+            return False
+        
+    def create_widgets(self):
+        # Create main container
+        self.main_frame = ttk.Frame(self.root)
+        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Header
+        self.header_frame = ttk.Frame(self.main_frame)
+        self.header_frame.pack(fill=tk.X, pady=(0,10))
+        
+        ttk.Label(self.header_frame, text="FileGuard", font=('Helvetica', 16, 'bold')).pack(side=tk.LEFT)
+        
+        # Controls frame
+        self.control_frame = ttk.LabelFrame(self.main_frame, text="Monitor Controls", padding=10)
+        self.control_frame.pack(fill=tk.X, pady=(0,10))
+        
+        # Path selection
+        self.path_frame = ttk.Frame(self.control_frame)
+        self.path_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(self.path_frame, text="Path:").pack(side=tk.LEFT)
+        self.path_entry = ttk.Entry(self.path_frame)
+        self.path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        
+        self.browse_btn = ttk.Button(self.path_frame, text="Browse", command=self.browse_path)
+        self.browse_btn.pack(side=tk.LEFT)
+        
+        # Action buttons
+        self.btn_frame = ttk.Frame(self.control_frame)
+        self.btn_frame.pack(fill=tk.X, pady=5)
+        
+        self.monitor_btn = ttk.Button(self.btn_frame, text="Start Monitoring", command=self.start_monitoring)
+        self.monitor_btn.pack(side=tk.LEFT, padx=2)
+        
+        self.save_btn = ttk.Button(self.btn_frame, text="Save History", command=self.save_history)
+        self.save_btn.pack(side=tk.LEFT, padx=2)
+        
+        self.clear_btn = ttk.Button(self.btn_frame, text="Clear Results", command=self.clear_results)
+        self.clear_btn.pack(side=tk.LEFT, padx=2)
+        
+        self.export_btn = ttk.Button(self.btn_frame, text="Export Report", command=self.export_report)
+        self.export_btn.pack(side=tk.LEFT, padx=2)
+        
+        # Results area
+        self.results_frame = ttk.LabelFrame(self.main_frame, text="Monitoring Results", padding=10)
+        self.results_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Treeview for file list
+        self.tree = ttk.Treeview(self.results_frame, columns=('status', 'path', 'previous', 'current'), show='headings')
+        self.tree.pack(fill=tk.BOTH, expand=True)
+        
+        # Configure tree columns
+        self.tree.heading('status', text='Status')
+        self.tree.heading('path', text='File Path')
+        self.tree.heading('previous', text='Previous Hash')
+        self.tree.heading('current', text='Current Hash')
+        
+        self.tree.column('status', width=100, anchor=tk.CENTER)
+        self.tree.column('path', width=300)
+        self.tree.column('previous', width=150)
+        self.tree.column('current', width=150)
+        
+        # Add scrollbar
+        scrollbar = ttk.Scrollbar(self.tree, orient=tk.VERTICAL, command=self.tree.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        
+        # Details panel
+        self.details_frame = ttk.Frame(self.results_frame)
+        self.details_frame.pack(fill=tk.X, pady=(5,0))
+        
+        self.details_text = scrolledtext.ScrolledText(
+            self.details_frame, 
+            height=8,
+            wrap=tk.WORD,
+            font=('Consolas', 10)
+        )
+        self.details_text.pack(fill=tk.BOTH, expand=True)
+        
+        # Status bar
+        self.status_var = tk.StringVar()
+        self.status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, padding=5)
+        self.status_bar.pack(fill=tk.X, side=tk.BOTTOM)
+        
+        # Bind tree selection
+        self.tree.bind('<<TreeviewSelect>>', self.show_details)
+        
+    def style_interface(self):
+        # Apply modern theme
+        sv_ttk.set_theme("dark")
+        
+        # Custom colors for status tags
+        self.tree.tag_configure('new', background='#2E7D32')
+        self.tree.tag_configure('modified', background='#FF8F00')
+        self.tree.tag_configure('unchanged', background='#1565C0')
+        self.tree.tag_configure('deleted', background='#C62828')
+        self.tree.tag_configure('error', background='#424242')
+        
+    def browse_path(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.path_entry.delete(0, tk.END)
+            self.path_entry.insert(0, path)
+        
+    def start_monitoring(self):
+        path = self.path_entry.get()
+        if not path:
+            messagebox.showwarning("Warning", "Please select a directory to monitor")
+            return
+            
+        self.status_var.set("Monitoring files...")
+        self.root.update()
+        
+        try:
+            self.current_hashes = {}
+            self.tree.delete(*self.tree.get_children())
+            self.details_text.delete(1.0, tk.END)
+            
+            results = self.monitor_directory(path)
+            self.display_results(results)
+            
+            self.status_var.set(f"Monitoring complete. {len(results)} files processed.")
+            self.save_history()
+            
+        except Exception as e:
+            self.status_var.set("Error during monitoring")
+            messagebox.showerror("Error", f"An error occurred: {str(e)}")
+            
+    def monitor_directory(self, dir_path):
+        results = []
+        found_files = set()
+        
+        for root, _, files in os.walk(dir_path):
+            for file in files:
+                full_path = os.path.join(root, file)
+                found_files.add(full_path)
+                result = self.check_file(full_path)
+                if result:
+                    results.append(result)
+        
+        # Check for deleted files
+        deleted_files = set(self.history.keys()) - found_files
+        for deleted_file in deleted_files:
+            results.append(('deleted', deleted_file, self.history[deleted_file], None))
+            
+        return results
+        
+    def check_file(self, file_path):
+        try:
+            current_hash = self.calculate_hash(file_path)
+            if current_hash is None:
+                return None
+                
+            self.current_hashes[file_path] = current_hash
+            prev_hash = self.history.get(file_path)
+            
+            if prev_hash is None:
+                return ('new', file_path, None, current_hash)
+            elif prev_hash != current_hash:
+                return ('modified', file_path, prev_hash, current_hash)
+            else:
+                return ('unchanged', file_path, prev_hash, current_hash)
+                
+        except Exception as e:
+            return ('error', file_path, None, f"Error: {str(e)}")
+            
+    def calculate_hash(self, file_path):
+        try:
+            hasher = hashlib.sha256()
+            with open(file_path, 'rb') as f:
+                while chunk := f.read(4096):
+                    hasher.update(chunk)
+            return hasher.hexdigest()
+        except Exception as e:
+            print(f"Error reading {file_path}: {str(e)}")
+            return None
+            
+    def display_results(self, results):
+        new_count = modified_count = unchanged_count = deleted_count = error_count = 0
+        
+        for result in results:
+            status, path, prev_hash, current_hash = result
+            
+            if status == 'new':
+                new_count += 1
+                prev_display = "N/A"
+                curr_display = current_hash[:8] + "..." if current_hash else "Error"
+            elif status == 'modified':
+                modified_count += 1
+                prev_display = prev_hash[:8] + "..." if prev_hash else "N/A"
+                curr_display = current_hash[:8] + "..." if current_hash else "Error"
+            elif status == 'unchanged':
+                unchanged_count += 1
+                prev_display = prev_hash[:8] + "..." if prev_hash else "N/A"
+                curr_display = current_hash[:8] + "..." if current_hash else "Error"
+            elif status == 'deleted':
+                deleted_count += 1
+                prev_display = prev_hash[:8] + "..." if prev_hash else "N/A"
+                curr_display = "DELETED"
+            else:  # error
+                error_count += 1
+                prev_display = "N/A"
+                curr_display = "ERROR"
+            
+            self.tree.insert('', tk.END, 
+                            values=(status.upper(), path, prev_display, curr_display),
+                            tags=(status,))
+        
+        # Update status with counts
+        counts = (f"New: {new_count} | Modified: {modified_count} | "
+                 f"Unchanged: {unchanged_count} | Deleted: {deleted_count}")
+        if error_count > 0:
+            counts += f" | Errors: {error_count}"
+        self.status_var.set(counts)
+        
+    def show_details(self, event):
+        selected = self.tree.focus()
+        if not selected:
+            return
+            
+        values = self.tree.item(selected, 'values')
+        status, path, prev_disp, curr_disp = values
+        
+        self.details_text.delete(1.0, tk.END)
+        
+        details = f"File: {path}\nStatus: {status}\n"
+        
+        if status == "NEW":
+            full_hash = next((v for k,v in self.current_hashes.items() if k == path), None)
+            details += f"Hash: {full_hash}\n"
+            details += f"First detected: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            
+        elif status == "MODIFIED":
+            prev_hash = self.history.get(path)
+            curr_hash = self.current_hashes.get(path)
+            
+            details += f"Previous hash: {prev_hash}\n"
+            details += f"Current hash:  {curr_hash}\n"
+            details += f"Changed at:    {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            
+        elif status == "UNCHANGED":
+            curr_hash = self.current_hashes.get(path)
+            details += f"Hash: {curr_hash}\n"
+            details += f"Last checked: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            
+        elif status == "DELETED":
+            prev_hash = self.history.get(path)
+            details += f"Previous hash: {prev_hash}\n"
+            details += f"Deleted at:    {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            
+        self.details_text.insert(tk.END, details)
+        
+    def clear_results(self):
+        self.tree.delete(*self.tree.get_children())
+        self.details_text.delete(1.0, tk.END)
+        self.status_var.set("Ready")
+        
+    def export_report(self):
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")],
+            title="Save Report As"
+        )
+        
+        if not file_path:
+            return
+            
+        try:
+            with open(file_path, 'w') as f:
+                f.write("FileGuard Integrity Report\n")
+                f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                
+                f.write("File Changes Summary:\n")
+                for item in self.tree.get_children():
+                    values = self.tree.item(item, 'values')
+                    f.write(f"{values[0]:<10} {values[1]}\n")
+                    f.write(f"  Previous: {values[2]}\n")
+                    f.write(f"  Current:  {values[3]}\n\n")
+                
+            messagebox.showinfo("Success", f"Report saved to:\n{file_path}")
+            self.status_var.set(f"Report exported to {file_path}")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not save report: {str(e)}")
+            self.status_var.set("Error exporting report")
+
+def main():
+    root = tk.Tk()
+    app = FileMonitorApp(root)
+    root.mainloop()
+
+if __name__ == '__main__':
+    main()
